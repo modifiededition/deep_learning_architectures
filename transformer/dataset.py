@@ -2,6 +2,12 @@ import torch
 import torch.nn as nn
 from torch.utils.data import Dataset
 
+
+def casual_mask(size):
+    mask = torch.triu(torch.ones(1,size,size), diagonal=1).type(torch.int)
+    return mask == 0
+
+
 class BilingualDataset(Dataset):
 
     def __init__(self, ds, tokenizer_src, tokenizer_tgt, src_lang, tgt_lang, seq_len):
@@ -77,9 +83,3 @@ class BilingualDataset(Dataset):
             "src_text": src_text,
             "tgt_text": tgt_text
         }
-
-
-
-def casual_mask(size):
-    mask = torch.triu(torch.ones(1,size,size), diagonal=1).type(torch.int)
-    return mask == 0

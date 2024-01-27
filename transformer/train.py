@@ -16,6 +16,8 @@ from dataset import BilingualDataset,casual_mask
 from model import build_transformer
 from config import get_config,get_weights_file_path
 
+import torchmetrics
+
 from pathlib import Path
 import warnings
 
@@ -51,9 +53,14 @@ def greedy_decode(model, source, source_mask, tokenizer_src, tokenizer_tgt, max_
 
     return decoder_input.squeeze(0)
 
-def run_validation(model, validation_ds, tokenizer_src, tokenizer_tgt, max_len,device, print_msg,global_state,writer,num_examples=2):
+def run_validation(model, validation_ds, tokenizer_src, tokenizer_tgt, max_len,device, print_msg,global_step,writer,num_examples=2):
     model.eval()
     count = 0
+
+    source_texts = []
+    expected = []
+    predicted = []
+
 
     # size of the control window
     console_width = 80
@@ -72,6 +79,11 @@ def run_validation(model, validation_ds, tokenizer_src, tokenizer_tgt, max_len,d
             target_text = batch["tgt_text"][0]
             model_out_text = tokenizer_tgt.decode(model_out.detach().cpu().numpy())
 
+            source_texts.append(source_text)
+            expected.append(target_text)
+            predicted.append(model_out_text)
+
+
             # print to the console
             print_msg('-'*console_width)
             print_msg(f"source: {source_text}")
@@ -80,6 +92,26 @@ def run_validation(model, validation_ds, tokenizer_src, tokenizer_tgt, max_len,d
 
             if count == num_examples:
                 break
+
+        if writer:
+            # Evaluate the character error rate
+            # Compute the char error rate
+            metric = torchmetrics.CharErrorRate()
+            cer = metric(predicted, expected)
+            writer.add_scalar('validation cer', cer, global_step)
+            writer.flush()
+
+            # Compute the word error rate
+            metric = torchmetrics.WordErrorRate()
+            wer = metric(predicted, expected)
+            writer.add_scalar('validation wer', wer, global_step)
+            writer.flush()
+
+            # Compute the BLEU metric
+            metric = torchmetrics.BLEUScore()
+            bleu = metric(predicted, expected)
+            writer.add_scalar('validation BLEU', bleu, global_step)
+            writer.flush()
 
 
 def get_all_sentences(ds, lang):
@@ -93,14 +125,16 @@ def get_or_build_tokenizer(config, ds, lang):
         tokenizer.pre_tokenizer = Whitespace()
         trainer = WordLevelTrainer(special_tokens=["[UNK]", "[PAD]", "[SOS]", "[EOS]"], min_frequency=2)
         tokenizer.train_from_iterator(get_all_sentences(ds, lang), trainer=trainer)
-        tokenizer.save(str(tokenizer))
+        tokenizer.save(str(tokenizer_path))
     else:
-        tokenizer = Tokenizer.from_file(tokenizer_path)
+        tokenizer = Tokenizer.from_file(str(tokenizer_path))
 
     return tokenizer
 
 def get_ds(config):
-    ds_raw = load_dataset('opus_books', f'{config["lang_src"]}-{config["lang_tgt"]}', split= 'train')
+
+    # 'opus_books'
+    ds_raw = load_dataset('findnitai/english-to-hinglish', f'{config["lang_src"]}-{config["lang_tgt"]}', split= 'train')
 
     # Build tokenizers
     src_tokenizer = get_or_build_tokenizer(config, ds_raw, config['lang_src'])
@@ -170,10 +204,11 @@ def train_model(config):
     loss_fn = nn.CrossEntropyLoss(ignore_index=src_tokenizer.token_to_id('[PAD]'), label_smoothing=0.1).to(device)
 
     for epoch in range(initial_epoch, config['num_epochs']):
-        model.train()
+
 
         batch_iterator = tqdm(train_dataloader, desc = f"Processing epoch {epoch:02d}")
         for batch in batch_iterator:
+            model.train()
 
             encoder_input = batch["encoder_input"].to(device) # (batch_size, seq_len)
             decoder_input = batch["decoder_input"].to(device) # (batch_size, seq_len)
@@ -202,6 +237,8 @@ def train_model(config):
             optimizer.zero_grad(set_to_none=True)
 
             global_step += 1
+
+        run_validation(model,val_dataloader,src_tokenizer,tgt_tokenizer,config["seq_len"],device,lambda msg: batch_iterator.write(msg),global_step,writer )
 
         # save the model at the end of every epoch
 
